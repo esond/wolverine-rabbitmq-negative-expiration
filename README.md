@@ -46,7 +46,7 @@ Results
     ... [error] <0.657.0> operation basic.publish caused a channel exception precondition_failed: invalid expiration '-1014': {value_negative,-1014}
 ```
 
-In three runs, both expired messages were published with a negative expiration and closed the channel every time. `bystander-1` was lost in all three runs. `bystander-2` was lost in two of the three. Whether a bystander is lost depends on whether it is in the same publish as the expired message.
+In four runs, both expired messages were published with a negative expiration and closed the channel every time. `bystander-1` was lost in all four runs. `bystander-2` was lost in two of the four. Whether a bystander is lost depends on whether it is in the same publish as the expired message.
 
 ## Where it comes from
 
