@@ -1,8 +1,8 @@
 # Wolverine sends expired messages to RabbitMQ with a negative expiration
 
-Wolverine's documentation says it discards an outgoing message whose `DeliverBy` time has passed. On RabbitMQ, it sends that message instead, with a negative `expiration` header. RabbitMQ rejects the publish and closes the sender channel, and other messages sent around the same time can be lost with it.
+Wolverine's documentation says it discards an outgoing message whose `DeliverBy` time has passed. On RabbitMQ, it sends that message instead, with a negative `expiration` header. RabbitMQ rejects the publish and closes the sender channel, and other messages in the same publish are lost with it.
 
-This repository is a single console program that shows the bug against a real broker.
+A message can pass its `DeliverBy` without anyone setting a strange value. Durable scheduled messages are released on the `ScheduledJobPollingTime` poll, every 5 seconds by default. A message scheduled 1 second out with `DeliverWithin = 4 seconds` has 3 seconds of slack after its scheduled time. If the next poll comes later than that, the message goes out past its `DeliverBy`. This repository shows that happening against a real broker and a real message store.
 
 ## Run it
 
@@ -12,11 +12,12 @@ You need Docker and the .NET 10 SDK.
 dotnet run
 ```
 
-The program starts RabbitMQ 4.3.1 in a container (Testcontainers), starts a Wolverine host that sends to and listens on one queue, and runs three steps:
+The program starts RabbitMQ 4.3.1 and PostgreSQL 17 in containers (Testcontainers). It then starts a Wolverine host with a durable outbox and inbox on PostgreSQL, which sends to and listens on one RabbitMQ queue. `ScheduledJobPollingTime` is left at its default.
 
 1. **Control.** Send a normal message. It arrives, so the listener works.
-2. **Expired send.** Send a message whose `DeliverBy` is one second in the past, then a normal message (`bystander-1`).
-3. **Expired scheduled send.** Schedule a message for two seconds from now with a `DeliverBy` one second from now, plus a normal message scheduled for the same time (`bystander-2`).
+2. **Ten trials.** Each trial schedules two messages for 1 second from now:
+   - `timed-N` has `DeliverWithin = 4 seconds`.
+   - `bystander-N` has no expiry.
 
 ## Expected
 
@@ -24,48 +25,62 @@ From [`docs/guide/messaging/expiration.md`](https://github.com/JasperFx/wolverin
 
 > 2. Wolverine will also discard outgoing messages that are past their `DeliverBy` time
 
-Both expired messages are discarded, the control and both bystanders arrive, and the broker logs no errors.
+A timed message released after its `DeliverBy` is discarded. Every bystander arrives, and the broker logs no errors.
 
 ## Actual
 
 Output from one run:
 
 ```text
-Control: send a normal message before anything expires.
-  control was received.
-Scenario 1: send a message whose DeliverBy has passed, then a normal message.
-warn: Wolverine.RabbitMQ.Internal.RabbitMqSender[0] Unexpected channel shutdown for Rabbit MQ (RabbitMqSender: rabbitmq://queue/repro). Wolverine will attempt to restart...
-  bystander-1 was NOT received within 15s.
-Scenario 2: schedule a message for 2s from now that expires 1s from now, plus a normal one at 2s.
-warn: Wolverine.RabbitMQ.Internal.RabbitMqSender[0] Unexpected channel shutdown for Rabbit MQ (RabbitMqSender: rabbitmq://queue/repro). Wolverine will attempt to restart...
-  bystander-2 was NOT received within 15s.
+control: received
+
+trial  timed         bystander     broker 'invalid expiration' errors
+    1  received      received      0
+    2  NOT received  NOT received  1
+    3  received      received      0
+    4  NOT received  received      1
+    5  received      received      0
+    6  NOT received  received      1
+    7  received      received      0
+    8  NOT received  NOT received  1
+    9  received      received      0
+   10  NOT received  NOT received  1
+
 Results
-  Received by the listener: [control]
-  RabbitMQ 'invalid expiration' errors: 2
-    ... [error] <0.650.0> operation basic.publish caused a channel exception precondition_failed: invalid expiration '-1001': {value_negative,-1001}
-    ... [error] <0.657.0> operation basic.publish caused a channel exception precondition_failed: invalid expiration '-1014': {value_negative,-1014}
+  timed messages not received:     5 of 10
+  bystanders not received:         3 of 10
+  RabbitMQ 'invalid expiration':   5
+    ... [error] <0.650.0> operation basic.publish caused a channel exception precondition_failed: invalid expiration '-702': {value_negative,-702}
+    ... [error] <0.657.0> operation basic.publish caused a channel exception precondition_failed: invalid expiration '-779': {value_negative,-779}
+    ...
 ```
 
-In four runs, both expired messages were published with a negative expiration and closed the channel every time. `bystander-1` was lost in all four runs. `bystander-2` was lost in two of the four. Whether a bystander is lost depends on whether it is in the same publish as the expired message.
+Each broker error comes with this warning from Wolverine:
+
+```text
+warn: Wolverine.RabbitMQ.Internal.RabbitMqSender[0] Unexpected channel shutdown for Rabbit MQ (RabbitMqSender: rabbitmq://queue/repro). Wolverine will attempt to restart...
+```
+
+In two runs, 5 of 10 timed messages were released late each time. Every late one was published with a negative expiration (-364 ms to -903 ms) instead of being discarded, and closed the channel. Bystanders with no expiry were lost in 1 of 10 trials in the first run and 3 of 10 in the second. Whether a bystander is lost depends on whether it goes out in the same publish as the late message. Whether a trial is late depends on where its scheduled time falls relative to the poll.
 
 ## Where it comes from
 
 These references are to WolverineFx 6.64.2, at commit [`db2a42c`](https://github.com/JasperFx/wolverine/tree/db2a42c5ae9900c507df373561d9575fb8891d54), which is the commit the package's PDB points to.
 
+- `ScheduledSendEnvelopeHandler.HandleAsync` releases a durable scheduled message through `MessageContext.ForwardScheduledEnvelopeAsync`. Neither checks `Envelope.IsExpired()`.
+- The send path does not check it either: `SendingAgent.EnqueueOutgoingAsync` and `StoreAndForwardAsync`.
 - `RabbitMqEnvelopeMapper` sets `props.Expiration` to `DeliverBy - DateTimeOffset.UtcNow` in milliseconds and does not clamp it.
-- The send path does not check `Envelope.IsExpired()`. This covers `SendingAgent.EnqueueOutgoingAsync` and `StoreAndForwardAsync`, and `ScheduledSendEnvelopeHandler`, which releases durable scheduled messages through `MessageContext.ForwardScheduledEnvelopeAsync`.
-- `IsExpired()` is checked on receive and on the outbox failure and recovery paths (`DurableSendingAgent`, `RecoverOutgoingMessagesCommand`, `RecoverStaleOutgoingStep`), which discard the envelope. The first send is the path where an expired envelope reaches the mapper.
+- `IsExpired()` is checked on receive and on the outbox failure and recovery paths (`DurableSendingAgent`, `RecoverOutgoingMessagesCommand`, `RecoverStaleOutgoingStep`), which discard the envelope. A first send, including the release of a scheduled message, is the path where an expired envelope reaches the mapper.
 
 The custom mapper sample in `docs/guide/messaging/transports/rabbitmq/interoperability.md` has the same unclamped computation.
 
 ## How we found it
 
-We schedule retries over RabbitMQ with a durable outbox, and each retry had a `DeliverBy` at the end of its retry window. Wolverine releases durable scheduled messages on its `ScheduledJobPollingTime` poll, every 5 seconds by default. A retry due less than one poll interval before its `DeliverBy` was often released after it, and that lost the retry and other messages in the same publish. In our tests, about 11% of retry sequences failed this way. Removing `DeliverWithin` removed every failure: 9 of 40 failed before the change, 0 of 40 after.
-
-This program uses in-memory scheduling and a `DeliverBy` that is earlier than the `ScheduledTime`, so the bug shows up on every run. Both cases reach the same mapper.
+We schedule retries over RabbitMQ with a durable outbox. Each retry had a `DeliverBy` at the end of its retry window, so the last retry in a window often had only a few seconds of slack. About 11% of retry sequences lost a retry this way, and the closed channel took other retries with it. Removing `DeliverWithin` removed every failure: 9 of 40 retry sequences failed before the change, 0 of 40 after.
 
 ## Versions
 
-- WolverineFx, WolverineFx.RabbitMQ and WolverineFx.RuntimeCompilation 6.64.2
+- WolverineFx, WolverineFx.RabbitMQ, WolverineFx.Postgresql and WolverineFx.RuntimeCompilation 6.64.2
 - RabbitMQ 4.3.1 (`rabbitmq:4.3.1` image)
+- PostgreSQL 17 (`postgres:17` image)
 - .NET 10

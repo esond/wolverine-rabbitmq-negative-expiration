@@ -8,7 +8,9 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="Testcontainers.PostgreSql" Version="4.17.0" />
     <PackageReference Include="Testcontainers.RabbitMq" Version="4.17.0" />
+    <PackageReference Include="WolverineFx.Postgresql" Version="6.64.2" />
     <PackageReference Include="WolverineFx.RabbitMQ" Version="6.64.2" />
     <PackageReference Include="WolverineFx.RuntimeCompilation" Version="6.64.2" />
   </ItemGroup>
