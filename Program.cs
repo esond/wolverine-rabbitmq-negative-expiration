@@ -89,9 +89,8 @@ foreach (var line in await BrokerErrors())
     Console.WriteLine($"    {line}");
 
 Console.WriteLine();
-Console.WriteLine("Expected (docs/guide/messaging/expiration.md: \"Wolverine will also discard outgoing messages that are");
-Console.WriteLine("past their DeliverBy time\"): a timed message released after its DeliverBy is discarded, every");
-Console.WriteLine("bystander is received, and the broker logs no errors.");
+Console.WriteLine("Expected: a timed message released after its DeliverBy is dropped, as Wolverine drops expired messages");
+Console.WriteLine("on receive and on outbox retry. Every bystander is received, and the broker logs no errors.");
 
 await host.StopAsync();
 

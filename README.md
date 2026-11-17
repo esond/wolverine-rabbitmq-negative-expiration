@@ -1,6 +1,6 @@
 # Wolverine sends expired messages to RabbitMQ with a negative expiration
 
-Wolverine's documentation says it discards an outgoing message whose `DeliverBy` time has passed. On RabbitMQ, it sends that message instead, with a negative `expiration` header. RabbitMQ rejects the publish and closes the sender channel, and other messages in the same publish are lost with it.
+When an outgoing message's `DeliverBy` time has passed by the time Wolverine sends it to RabbitMQ, the message goes out with a negative `expiration` header. RabbitMQ rejects the publish and closes the sender channel, and other messages in the same publish are lost with it.
 
 A message can pass its `DeliverBy` without anyone setting a strange value. Durable scheduled messages are released on the `ScheduledJobPollingTime` poll, every 5 seconds by default. A message scheduled 1 second out with `DeliverWithin = 4 seconds` has 3 seconds of slack after its scheduled time. If the next poll comes later than that, the message goes out past its `DeliverBy`. This repository shows that happening against a real broker and a real message store.
 
@@ -21,11 +21,7 @@ The program starts RabbitMQ 4.3.1 and PostgreSQL 17 in containers (Testcontainer
 
 ## Expected
 
-From [`docs/guide/messaging/expiration.md`](https://github.com/JasperFx/wolverine/blob/main/docs/guide/messaging/expiration.md):
-
-> 2. Wolverine will also discard outgoing messages that are past their `DeliverBy` time
-
-A timed message released after its `DeliverBy` is discarded. Every bystander arrives, and the broker logs no errors.
+A timed message released after its `DeliverBy` is dropped, the same way Wolverine drops an expired message on receive or when its outbox retries one. Every bystander arrives, and the broker logs no errors.
 
 ## Actual
 
@@ -61,7 +57,7 @@ Each broker error comes with this warning from Wolverine:
 warn: Wolverine.RabbitMQ.Internal.RabbitMqSender[0] Unexpected channel shutdown for Rabbit MQ (RabbitMqSender: rabbitmq://queue/repro). Wolverine will attempt to restart...
 ```
 
-In two runs, 5 of 10 timed messages were released late each time. Every late one was published with a negative expiration (-364 ms to -903 ms) instead of being discarded, and closed the channel. Bystanders with no expiry were lost in 1 of 10 trials in the first run and 3 of 10 in the second. Whether a bystander is lost depends on whether it goes out in the same publish as the late message. Whether a trial is late depends on where its scheduled time falls relative to the poll.
+In two runs, 5 of 10 timed messages were released late each time. Every late one was published with a negative expiration (-364 ms to -903 ms) and closed the channel. Bystanders with no expiry were lost in 1 of 10 trials in the first run and 3 of 10 in the second. Whether a bystander is lost depends on whether it goes out in the same publish as the late message. Whether a trial is late depends on where its scheduled time falls relative to the poll.
 
 ## Where it comes from
 
@@ -70,9 +66,9 @@ These references are to WolverineFx 6.64.2, at commit [`db2a42c`](https://github
 - `ScheduledSendEnvelopeHandler.HandleAsync` releases a durable scheduled message through `MessageContext.ForwardScheduledEnvelopeAsync`. Neither checks `Envelope.IsExpired()`.
 - The send path does not check it either: `SendingAgent.EnqueueOutgoingAsync` and `StoreAndForwardAsync`.
 - `RabbitMqEnvelopeMapper` sets `props.Expiration` to `DeliverBy - DateTimeOffset.UtcNow` in milliseconds and does not clamp it.
-- `IsExpired()` is checked on receive and on the outbox failure and recovery paths (`DurableSendingAgent`, `RecoverOutgoingMessagesCommand`, `RecoverStaleOutgoingStep`), which discard the envelope. A first send, including the release of a scheduled message, is the path where an expired envelope reaches the mapper.
+- `IsExpired()` is checked on receive and on the outbox failure and recovery paths (`DurableSendingAgent`, `RecoverOutgoingMessagesCommand`, `RecoverStaleOutgoingStep`), which drop the envelope. A first send, including the release of a scheduled message, is the path where an expired envelope reaches the mapper.
 
-The custom mapper sample in `docs/guide/messaging/transports/rabbitmq/interoperability.md` has the same unclamped computation.
+The custom mapper sample in `docs/guide/messaging/transports/rabbitmq/interoperability.md` computes the TTL the same way.
 
 ## How we found it
 
